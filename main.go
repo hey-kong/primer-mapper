@@ -11,8 +11,7 @@ import (
 
 	logger "github.com/d2r2/go-logger"
 	"github.com/d2r2/go-shell"
-	"github.com/yosssi/gmq/mqtt"
-	"github.com/yosssi/gmq/mqtt/client"
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"primer-mapper/common"
 )
 
@@ -21,25 +20,17 @@ var log = logger.NewPackageLogger("main",
 	// logger.InfoLevel,
 )
 
-func connectToMqtt() *client.Client {
-	cli := client.New(&client.Options{
-		// Define the processing of the error handler.
-		ErrorHandler: func(err error) {
-			fmt.Println(err)
-		},
-	})
-	defer cli.Terminate()
+func connectToMqtt() mqtt.Client {
+	opts := mqtt.NewClientOptions().AddBroker("mqtt://175.178.163.249:1883")
 
-	// Connect to the MQTT Server.
-	err := cli.Connect(&client.ConnectOptions{
-		Network:  "tcp",
-		Address:  "localhost:1883",
-		ClientID: []byte("receive-client"),
-	})
-	if err != nil {
-		panic(err)
+	opts.SetKeepAlive(60 * time.Second)
+	opts.SetPingTimeout(1 * time.Second)
+
+	c := mqtt.NewClient(opts)
+	if token := c.Connect(); token.Wait() && token.Error() != nil {
+		panic(token.Error())
 	}
-	return cli
+	return c
 }
 
 func main() {
@@ -72,9 +63,12 @@ func main() {
 	// connect to Mqtt broker
 	cli := connectToMqtt()
 
-	for {
-		handleZigbee(cli)
+	// subscribe device msg
+	handleZigbee(cli)
 
+	// TODO: subscribe command msg
+
+	for {
 		select {
 		// Check for termination request
 		case <-ctx.Done():
@@ -82,7 +76,7 @@ func main() {
 			term = true
 			// sleep 10 ms before next round
 			// (recommended by specification as "collecting period")
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(1000 * time.Millisecond):
 		}
 		if term {
 			break
@@ -91,29 +85,10 @@ func main() {
 	log.Info("exited")
 }
 
-func handleZigbee(cli *client.Client) {
-	topic := "zigbee/+"
-	err := cli.Subscribe(&client.SubscribeOptions{
-		SubReqs: []*client.SubReq{
-			&client.SubReq{
-				TopicFilter: []byte(topic),
-				QoS:         mqtt.QoS0,
-				Handler: func(topicName, message []byte) {
-					OperateUpdateZigbeeSub(cli, message)
-				},
-			},
-		},
-	})
-
-	if err != nil {
-		panic(err)
-	}
-}
-
-func OperateUpdateZigbeeSub(cli *client.Client, msg []byte) {
-	log.Info("Receive msg\n", string(msg))
+var OperateUpdateZigbeeSub mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
+	log.Info("Receive msg\n", string(msg.Payload()))
 	current := make(map[string]string)
-	if err := json.Unmarshal(msg, &current); err != nil {
+	if err := json.Unmarshal(msg.Payload(), &current); err != nil {
 		log.Errorf("unmarshal receive msg to device state, error %v\n", err)
 		return
 	}
@@ -122,10 +97,14 @@ func OperateUpdateZigbeeSub(cli *client.Client, msg []byte) {
 	publishToMqtt(cli, current)
 }
 
-func publishToMqtt(cli *client.Client, current map[string]string) {
+func handleZigbee(cli mqtt.Client) {
+	topic := "zigbee/+"
+	cli.Subscribe(topic, 0, OperateUpdateZigbeeSub)
+}
+
+func publishToMqtt(cli mqtt.Client, current map[string]string) {
 	id := current["id"]
 	if id == "" {
-		log.Error("Wrong device msg")
 		return
 	}
 
@@ -135,13 +114,9 @@ func publishToMqtt(cli *client.Client, current map[string]string) {
 		go func(field string, value string) {
 			updateMessage := createActualUpdateMessage(field, value, timestamp)
 			twinUpdateBody, _ := json.Marshal(updateMessage)
-			log.Info(string(twinUpdateBody))
+			fmt.Println(string(twinUpdateBody))
 
-			cli.Publish(&client.PublishOptions{
-				TopicName: []byte(deviceTwinUpdate),
-				QoS:       mqtt.QoS0,
-				Message:   twinUpdateBody,
-			})
+			cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
 		}(f, v)
 	}
 }
