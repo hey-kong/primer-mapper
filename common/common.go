@@ -1,5 +1,7 @@
 package common
 
+import "time"
+
 const (
 	DevicePrefix            = "$hw/events/device/"
 	TwinUpdateSuffix        = "/twin/update"
@@ -8,8 +10,6 @@ const (
 	TwinCloudSyncSuffix     = "/twin/cloud_updated"
 	TwinGetResultSuffix     = "/twin/get/result"
 	TwinGetSuffix           = "/twin/get"
-
-	DeviceID = "zigbee-device-01"
 )
 
 // DeviceStateUpdate is the structure used in updating the device state
@@ -59,4 +59,8 @@ type MsgTwin struct {
 type DeviceTwinUpdate struct {
 	BaseMessage
 	Twin map[string]*MsgTwin `json:"twin"`
+}
+
+func GetTimestamp() int64 {
+	return time.Now().UnixNano() / 1e6
 }

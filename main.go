@@ -5,23 +5,42 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
+	"reflect"
 	"syscall"
 	"time"
-
-	"primer-mapper/common"
-	"primer-mapper/device"
 
 	logger "github.com/d2r2/go-logger"
 	"github.com/d2r2/go-shell"
 	"github.com/yosssi/gmq/mqtt"
 	"github.com/yosssi/gmq/mqtt/client"
+	"primer-mapper/common"
 )
 
 var log = logger.NewPackageLogger("main",
 	logger.DebugLevel,
 	// logger.InfoLevel,
 )
+
+func connectToMqtt() *client.Client {
+	cli := client.New(&client.Options{
+		// Define the processing of the error handler.
+		ErrorHandler: func(err error) {
+			fmt.Println(err)
+		},
+	})
+	defer cli.Terminate()
+
+	// Connect to the MQTT Server.
+	err := cli.Connect(&client.ConnectOptions{
+		Network:  "tcp",
+		Address:  "localhost:1883",
+		ClientID: []byte("receive-client"),
+	})
+	if err != nil {
+		panic(err)
+	}
+	return cli
+}
 
 func main() {
 	defer logger.FinalizeLogger()
@@ -54,31 +73,16 @@ func main() {
 	cli := connectToMqtt()
 
 	for {
-		topic := "Zigbee/0ea11c12123a"
-		err := cli.Subscribe(&client.SubscribeOptions{
-			SubReqs: []*client.SubReq{
-				&client.SubReq{
-					TopicFilter: []byte(topic),
-					QoS:         mqtt.QoS0,
-					Handler: func(topicName, message []byte) {
-						OperateUpdateZigbeeSub(cli, message)
-					},
-				},
-			},
-		})
-
-		if err != nil {
-			panic(err)
-		}
+		handleZigbee(cli)
 
 		select {
 		// Check for termination request
 		case <-ctx.Done():
 			log.Errorf("Termination pending: %s", ctx.Err())
 			term = true
-			// sleep 100 ms before next round
+			// sleep 10 ms before next round
 			// (recommended by specification as "collecting period")
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(10 * time.Millisecond):
 		}
 		if term {
 			break
@@ -87,60 +91,68 @@ func main() {
 	log.Info("exited")
 }
 
-func connectToMqtt() *client.Client {
-	cli := client.New(&client.Options{
-		// Define the processing of the error handler.
-		ErrorHandler: func(err error) {
-			fmt.Println(err)
+func handleZigbee(cli *client.Client) {
+	topic := "zigbee/+"
+	err := cli.Subscribe(&client.SubscribeOptions{
+		SubReqs: []*client.SubReq{
+			&client.SubReq{
+				TopicFilter: []byte(topic),
+				QoS:         mqtt.QoS0,
+				Handler: func(topicName, message []byte) {
+					OperateUpdateZigbeeSub(cli, message)
+				},
+			},
 		},
 	})
-	defer cli.Terminate()
 
-	// Connect to the MQTT Server.
-	err := cli.Connect(&client.ConnectOptions{
-		Network:  "tcp",
-		Address:  "localhost:1883",
-		ClientID: []byte("receive-client"),
-	})
 	if err != nil {
 		panic(err)
 	}
-	return cli
 }
 
 func OperateUpdateZigbeeSub(cli *client.Client, msg []byte) {
 	log.Info("Receive msg\n", string(msg))
-	current := &device.ZigbeeDeviceState{}
-	if err := json.Unmarshal(msg, current); err != nil {
+	current := make(map[string]string)
+	if err := json.Unmarshal(msg, &current); err != nil {
 		log.Errorf("unmarshal receive msg to device state, error %v\n", err)
 		return
 	}
 
 	// publish status to mqtt broker
-	valueMap := map[string]string{"temperature": strconv.Itoa(current.Temperature), "humidity": strconv.Itoa(current.Humidity), "led": strconv.FormatBool(current.Led)}
-	publishToMqtt(cli, valueMap)
+	publishToMqtt(cli, current)
 }
 
-func publishToMqtt(cli *client.Client, valueMap map[string]string) {
-	deviceTwinUpdate := common.DevicePrefix + common.DeviceID + common.TwinUpdateSuffix
+func publishToMqtt(cli *client.Client, current map[string]string) {
+	id := current["id"]
+	if id == "" {
+		log.Error("Wrong device msg")
+		return
+	}
 
-	for f, v := range valueMap {
-		updateMessage := createActualUpdateMessage(f, v)
-		twinUpdateBody, _ := json.Marshal(updateMessage)
-		log.Info(string(twinUpdateBody))
+	deviceTwinUpdate := common.DevicePrefix + id + common.TwinUpdateSuffix
+	timestamp := common.GetTimestamp()
+	for f, v := range current {
+		go func(field string, value string) {
+			updateMessage := createActualUpdateMessage(field, value, timestamp)
+			twinUpdateBody, _ := json.Marshal(updateMessage)
+			log.Info(string(twinUpdateBody))
 
-		cli.Publish(&client.PublishOptions{
-			TopicName: []byte(deviceTwinUpdate),
-			QoS:       mqtt.QoS0,
-			Message:   twinUpdateBody,
-		})
+			cli.Publish(&client.PublishOptions{
+				TopicName: []byte(deviceTwinUpdate),
+				QoS:       mqtt.QoS0,
+				Message:   twinUpdateBody,
+			})
+		}(f, v)
 	}
 }
 
 //createActualUpdateMessage function is used to create the device twin update message
-func createActualUpdateMessage(field string, actualValue string) common.DeviceTwinUpdate {
-	var deviceTwinUpdateMessage common.DeviceTwinUpdate
-	actualMap := map[string]*common.MsgTwin{field: {Actual: &common.TwinValue{Value: &actualValue}, Metadata: &common.TypeMetadata{Type: "Updated"}}}
-	deviceTwinUpdateMessage.Twin = actualMap
-	return deviceTwinUpdateMessage
+func createActualUpdateMessage(field string, value string, timestamp int64) common.DeviceTwinUpdate {
+	var updateMsg common.DeviceTwinUpdate
+	updateMsg.BaseMessage.Timestamp = timestamp
+	updateMsg.Twin = map[string]*common.MsgTwin{}
+	updateMsg.Twin[field] = &common.MsgTwin{}
+	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &value}
+	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: reflect.TypeOf(value).String()}
+	return updateMsg
 }
