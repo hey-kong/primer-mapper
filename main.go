@@ -12,6 +12,7 @@ import (
 	logger "github.com/d2r2/go-logger"
 	"github.com/d2r2/go-shell"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+
 	"primer-mapper/common"
 )
 
@@ -87,7 +88,7 @@ func main() {
 
 var OperateUpdateZigbeeSub mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
 	log.Info("Receive msg\n", string(msg.Payload()))
-	current := make(map[string]string)
+	current := make(map[string]interface{})
 	if err := json.Unmarshal(msg.Payload(), &current); err != nil {
 		log.Errorf("unmarshal receive msg to device state, error %v\n", err)
 		return
@@ -102,16 +103,16 @@ func handleZigbee(cli mqtt.Client) {
 	cli.Subscribe(topic, 0, OperateUpdateZigbeeSub)
 }
 
-func publishToMqtt(cli mqtt.Client, current map[string]string) {
+func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
 	id := current["id"]
 	if id == "" {
 		return
 	}
 
-	deviceTwinUpdate := common.DevicePrefix + id + common.TwinUpdateSuffix
+	deviceTwinUpdate := common.DevicePrefix + id.(string) + common.TwinUpdateSuffix
 	timestamp := common.GetTimestamp()
 	for f, v := range current {
-		go func(field string, value string) {
+		go func(field string, value interface{}) {
 			updateMessage := createActualUpdateMessage(field, value, timestamp)
 			twinUpdateBody, _ := json.Marshal(updateMessage)
 			fmt.Println(string(twinUpdateBody))
@@ -122,12 +123,13 @@ func publishToMqtt(cli mqtt.Client, current map[string]string) {
 }
 
 //createActualUpdateMessage function is used to create the device twin update message
-func createActualUpdateMessage(field string, value string, timestamp int64) common.DeviceTwinUpdate {
+func createActualUpdateMessage(field string, value interface{}, timestamp int64) common.DeviceTwinUpdate {
 	var updateMsg common.DeviceTwinUpdate
 	updateMsg.BaseMessage.Timestamp = timestamp
 	updateMsg.Twin = map[string]*common.MsgTwin{}
 	updateMsg.Twin[field] = &common.MsgTwin{}
-	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &value}
+	vstr := common.Itos(value)
+	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &vstr}
 	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: reflect.TypeOf(value).String()}
 	return updateMsg
 }
