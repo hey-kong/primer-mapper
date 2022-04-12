@@ -130,6 +130,6 @@ func createActualUpdateMessage(field string, value interface{}, timestamp int64)
 	updateMsg.Twin[field] = &common.MsgTwin{}
 	vstr := common.Itos(value)
 	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &vstr}
-	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: reflect.TypeOf(value).String()}
+	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: reflect.TypeOf(vstr).String()}
 	return updateMsg
 }
