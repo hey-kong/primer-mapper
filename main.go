@@ -5,16 +5,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"reflect"
 	"syscall"
 	"time"
 
+	"github.com/boltdb/bolt"
 	logger "github.com/d2r2/go-logger"
 	"github.com/d2r2/go-shell"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/patrickmn/go-cache"
 
 	"primer-mapper/common"
 )
+
+var mqttServer = "mqtt://175.178.163.249:1883"
+
+var boltDB *bolt.DB
+var dir = "/tmp/boltdb"
+var dbName = "boltdb.db"
+var tblName = "DeviceStatus"
+
+var c *cache.Cache
+var expiration = 60 * time.Second
 
 var log = logger.NewPackageLogger("main",
 	logger.DebugLevel,
@@ -22,7 +33,7 @@ var log = logger.NewPackageLogger("main",
 )
 
 func connectToMqtt() mqtt.Client {
-	opts := mqtt.NewClientOptions().AddBroker("mqtt://175.178.163.249:1883")
+	opts := mqtt.NewClientOptions().AddBroker(mqttServer)
 
 	opts.SetKeepAlive(60 * time.Second)
 	opts.SetPingTimeout(1 * time.Second)
@@ -35,6 +46,15 @@ func connectToMqtt() mqtt.Client {
 }
 
 func main() {
+	// create or load boltDB to persist device status
+	loadDB()
+	defer boltDB.Close()
+
+	// create a cache with an expiration time , and which purges expired
+	// items every 2*expiration time for checking offline devices
+	c = cache.New(expiration, 2*expiration)
+	c.OnEvicted(updateToOfflineStatus)
+
 	defer logger.FinalizeLogger()
 
 	log.Notify("***************************************************************************************************")
@@ -75,9 +95,9 @@ func main() {
 		case <-ctx.Done():
 			log.Errorf("Termination pending: %s", ctx.Err())
 			term = true
-			// sleep 10 ms before next round
-			// (recommended by specification as "collecting period")
-		case <-time.After(1000 * time.Millisecond):
+		// sleep 10 ms before next round
+		// (recommended by specification as "collecting period")
+		case <-time.After(10 * time.Millisecond):
 		}
 		if term {
 			break
@@ -104,32 +124,101 @@ func handleZigbee(cli mqtt.Client) {
 }
 
 func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
-	id := current["id"]
+	id := current["id"].(string)
 	if id == "" {
 		return
 	}
 
-	deviceTwinUpdate := common.DevicePrefix + id.(string) + common.TwinUpdateSuffix
-	timestamp := common.GetTimestamp()
+	// check status
+	c.Set(id, true, cache.DefaultExpiration)
+	updateToOnlineStatus(id)
+	// forward message
+	deviceTwinUpdate := common.DevicePrefix + id + common.TwinUpdateSuffix
+	t := common.GetTimestamp()
 	for f, v := range current {
-		go func(field string, value interface{}) {
-			updateMessage := createActualUpdateMessage(field, value, timestamp)
+		go func(field string, value interface{}, timestamp int64) {
+			updateMessage := createActualUpdateMessage(field, common.Itos(value), timestamp)
 			twinUpdateBody, _ := json.Marshal(updateMessage)
 			fmt.Println(string(twinUpdateBody))
 
 			cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
-		}(f, v)
+		}(f, v, t)
 	}
 }
 
 //createActualUpdateMessage function is used to create the device twin update message
-func createActualUpdateMessage(field string, value interface{}, timestamp int64) common.DeviceTwinUpdate {
+func createActualUpdateMessage(field string, value string, timestamp int64) common.DeviceTwinUpdate {
 	var updateMsg common.DeviceTwinUpdate
 	updateMsg.BaseMessage.Timestamp = timestamp
 	updateMsg.Twin = map[string]*common.MsgTwin{}
 	updateMsg.Twin[field] = &common.MsgTwin{}
-	vstr := common.Itos(value)
-	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &vstr}
-	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: reflect.TypeOf(vstr).String()}
+	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &value}
+	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: "string"}
 	return updateMsg
+}
+
+func loadDB() {
+	if ok := common.PathIsExist(dir); !ok {
+		common.CreateDir(dir)
+	}
+
+	var err error
+	boltDB, err = bolt.Open(dir+dbName, 0666, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	err = boltDB.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(tblName))
+		if b == nil {
+			_, err := tx.CreateBucket([]byte(tblName))
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+var inactive = ""
+var online = "Online"
+var offline = "Offline"
+var disabled = "Disabled"
+
+func updateToOnlineStatus(deviceID string) {
+	err := boltDB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(tblName))
+		if b != nil {
+			val := b.Get([]byte(deviceID))
+			status := string(val)
+			if status == inactive || status == offline {
+				b.Put([]byte(deviceID), []byte(online))
+				createActualUpdateMessage("Status", online, common.GetTimestamp())
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func updateToOfflineStatus(deviceID string, v interface{}) {
+	err := boltDB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(tblName))
+		if b != nil {
+			b.Put([]byte(deviceID), []byte(offline))
+			createActualUpdateMessage("Status", offline, common.GetTimestamp())
+		}
+		return nil
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
 }
