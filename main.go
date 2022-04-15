@@ -3,16 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"syscall"
 	"time"
 
 	"github.com/boltdb/bolt"
-	logger "github.com/d2r2/go-logger"
 	"github.com/d2r2/go-shell"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/patrickmn/go-cache"
+	"github.com/sirupsen/logrus"
 
 	"primer-mapper/common"
 )
@@ -27,10 +26,8 @@ var tblName = "DeviceStatus"
 var c *cache.Cache
 var expiration = 60 * time.Second
 
-var log = logger.NewPackageLogger("main",
-	logger.DebugLevel,
-	// logger.InfoLevel,
-)
+var logFile = "/tmp/log/primer_mapper.log"
+var log = logrus.New()
 
 func connectToMqtt() mqtt.Client {
 	opts := mqtt.NewClientOptions().AddBroker(mqttServer)
@@ -55,16 +52,18 @@ func main() {
 	c = cache.New(expiration, 2*expiration)
 	c.OnEvicted(updateToOfflineStatus)
 
-	defer logger.FinalizeLogger()
-
-	log.Notify("***************************************************************************************************")
-	log.Notify("*** You can change verbosity of output, to modify logging level of module \"dht\"")
-	log.Notify("*** Uncomment/comment corresponding lines with call to ChangePackageLogLevel(...)")
-	log.Notify("***************************************************************************************************")
-	log.Notify("*** Massive stress test of sensor reading, printing in the end summary statistical results")
-	log.Notify("***************************************************************************************************")
-	// Uncomment/comment next line to suppress/increase verbosity of output
-	logger.ChangePackageLogLevel("dht", logger.InfoLevel)
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err == nil {
+		log.Out = file
+	} else {
+		log.Info("Failed to log to file, using default stderr")
+	}
+	log.Println("***************************************************************************************************")
+	log.Println("*** You can change verbosity of output, to modify logging level of module \"dht\"")
+	log.Println("*** Uncomment/comment corresponding lines with call to ChangePackageLogLevel(...)")
+	log.Println("***************************************************************************************************")
+	log.Println("*** Massive stress test of sensor reading, printing in the end summary statistical results")
+	log.Println("***************************************************************************************************")
 
 	// create context with cancellation possibility
 	ctx, cancel := context.WithCancel(context.Background())
@@ -107,7 +106,7 @@ func main() {
 }
 
 var OperateUpdateZigbeeSub mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
-	log.Info("Receive msg\n", string(msg.Payload()))
+	log.Info("Receive msg: ", string(msg.Payload()))
 	current := make(map[string]interface{})
 	if err := json.Unmarshal(msg.Payload(), &current); err != nil {
 		log.Errorf("unmarshal receive msg to device state, error %v\n", err)
@@ -142,7 +141,6 @@ func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
 		go func(field string, value interface{}, timestamp int64) {
 			updateMessage := createActualUpdateMessage(field, common.Itos(value), timestamp)
 			twinUpdateBody, _ := json.Marshal(updateMessage)
-			fmt.Println(string(twinUpdateBody))
 
 			cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
 		}(f, v, t)
@@ -188,51 +186,61 @@ func loadDB() {
 }
 
 var inactive = ""
-var online = "Online"
-var offline = "Offline"
-var disabled = "Disabled"
+var online = "online"
+var offline = "offline"
+var disabled = "disabled"
 
 func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
-	err := boltDB.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(tblName))
-		if b != nil {
-			val := b.Get([]byte(deviceID))
-			status := string(val)
-			if status == inactive || status == offline {
-				deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
-				updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
-				twinUpdateBody, _ := json.Marshal(updateMessage)
-				fmt.Println(string(twinUpdateBody))
+	tx, err := boltDB.Begin(true)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tx.Rollback()
 
-				cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
-				b.Put([]byte(deviceID), []byte(online))
+	b := tx.Bucket([]byte(tblName))
+	if b != nil {
+		val := b.Get([]byte(deviceID))
+		status := string(val)
+		if status == inactive || status == offline {
+			deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
+			updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
+			twinUpdateBody, _ := json.Marshal(updateMessage)
+			log.Printf("device %s is online", deviceID)
+
+			cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
+			if err := b.Put([]byte(deviceID), []byte(online)); err != nil {
+				log.Fatal(err)
 			}
 		}
-		return nil
-	})
+	}
 
-	if err != nil {
+	if err := tx.Commit(); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func updateToOfflineStatus(deviceID string, v interface{}) {
-	err := boltDB.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(tblName))
-		if b != nil {
-			cli := *v.(*mqtt.Client)
-			deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
-			updateMessage := createActualUpdateMessage("status", offline, common.GetTimestamp())
-			twinUpdateBody, _ := json.Marshal(updateMessage)
-			fmt.Println(string(twinUpdateBody))
-
-			cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
-			b.Put([]byte(deviceID), []byte(offline))
-		}
-		return nil
-	})
-
+	tx, err := boltDB.Begin(true)
 	if err != nil {
+		log.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	b := tx.Bucket([]byte(tblName))
+	if b != nil {
+		cli := *v.(*mqtt.Client)
+		deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
+		updateMessage := createActualUpdateMessage("status", offline, common.GetTimestamp())
+		twinUpdateBody, _ := json.Marshal(updateMessage)
+		log.Printf("device %s is offline", deviceID)
+
+		cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
+		if err := b.Put([]byte(deviceID), []byte(offline)); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
 		log.Fatal(err)
 	}
 }
