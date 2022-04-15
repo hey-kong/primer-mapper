@@ -130,12 +130,15 @@ func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
 	}
 
 	// check status
-	c.Set(id, true, cache.DefaultExpiration)
-	updateToOnlineStatus(id)
+	c.Set(id, &cli, cache.DefaultExpiration)
+	updateToOnlineStatus(cli, id)
 	// forward message
 	deviceTwinUpdate := common.DevicePrefix + id + common.TwinUpdateSuffix
 	t := common.GetTimestamp()
 	for f, v := range current {
+		if f == "id" {
+			continue
+		}
 		go func(field string, value interface{}, timestamp int64) {
 			updateMessage := createActualUpdateMessage(field, common.Itos(value), timestamp)
 			twinUpdateBody, _ := json.Marshal(updateMessage)
@@ -189,15 +192,20 @@ var online = "Online"
 var offline = "Offline"
 var disabled = "Disabled"
 
-func updateToOnlineStatus(deviceID string) {
+func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 	err := boltDB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(tblName))
 		if b != nil {
 			val := b.Get([]byte(deviceID))
 			status := string(val)
 			if status == inactive || status == offline {
+				deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
+				updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
+				twinUpdateBody, _ := json.Marshal(updateMessage)
+				fmt.Println(string(twinUpdateBody))
+
+				cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
 				b.Put([]byte(deviceID), []byte(online))
-				createActualUpdateMessage("Status", online, common.GetTimestamp())
 			}
 		}
 		return nil
@@ -212,8 +220,14 @@ func updateToOfflineStatus(deviceID string, v interface{}) {
 	err := boltDB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(tblName))
 		if b != nil {
+			cli := *v.(*mqtt.Client)
+			deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
+			updateMessage := createActualUpdateMessage("status", offline, common.GetTimestamp())
+			twinUpdateBody, _ := json.Marshal(updateMessage)
+			fmt.Println(string(twinUpdateBody))
+
+			cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
 			b.Put([]byte(deviceID), []byte(offline))
-			createActualUpdateMessage("Status", offline, common.GetTimestamp())
 		}
 		return nil
 	})
