@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,9 +22,10 @@ import (
 var mqttServer = "mqtt://175.178.163.249:1883"
 
 var boltDB *bolt.DB
-var dir = "/tmp/boltdb"
+var dir = "/tmp/boltdb/"
 var dbName = "boltdb.db"
-var tblName = "DeviceStatus"
+var statusTblName = "DeviceStatus"
+var gatewayTblName = "DeviceGate"
 
 var c *cache.Cache
 var expiration = 60 * time.Second
@@ -86,7 +90,8 @@ func main() {
 	// subscribe device msg
 	handleZigbee(cli)
 
-	// TODO: subscribe command msg
+	// subscribe command msg
+	handleDownstream(cli)
 
 	for {
 		select {
@@ -105,7 +110,7 @@ func main() {
 	log.Info("exited")
 }
 
-var OperateUpdateZigbeeSub mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
+var OperateUpdateUpstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
 	log.Info("Receive msg: ", string(msg.Payload()))
 	current := make(map[string]interface{})
 	if err := json.Unmarshal(msg.Payload(), &current); err != nil {
@@ -113,13 +118,107 @@ var OperateUpdateZigbeeSub mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.
 		return
 	}
 
-	// publish status to mqtt broker
+	// publish to mqtt broker
 	publishToMqtt(cli, current)
+}
+
+var OperateUpdateZigbeeDownstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
+	id := getDeviceID(msg.Topic())
+	if id == "" {
+		log.Fatal("Wrong topic")
+		return
+	}
+
+	log.Info("Receive msg: ", string(msg.Payload()))
+	var delta common.DeviceTwinDelta
+	if err := json.Unmarshal(msg.Payload(), &delta); err != nil {
+		log.Errorf("Unmarshal message failed: %v", err)
+		return
+	}
+
+	upstream := make(map[string]interface{})
+	downstream := make(map[string]interface{})
+	for twinName, twinValue := range delta.Delta {
+		if twinName == "status" {
+			tx, err := boltDB.Begin(true)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			b := tx.Bucket([]byte(statusTblName))
+			if b != nil {
+				if err := b.Put([]byte(id), []byte(twinValue)); err != nil {
+					tx.Rollback()
+					log.Fatal(err)
+				}
+			}
+
+			if err := tx.Commit(); err != nil {
+				tx.Rollback()
+				log.Fatal(err)
+			}
+		}
+		if twinName == "gateway" {
+			tx, err := boltDB.Begin(true)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			b := tx.Bucket([]byte(gatewayTblName))
+			if b != nil {
+				if err := b.Put([]byte(id), []byte(twinValue)); err != nil {
+					tx.Rollback()
+					log.Fatal(err)
+				}
+			}
+
+			if err := tx.Commit(); err != nil {
+				tx.Rollback()
+				log.Fatal(err)
+			}
+		}
+
+		t := common.MatchType(twinValue)
+		if t == "float" {
+			upstream[twinName] = strings.TrimRight(twinValue, "f")
+			val, err := strconv.ParseFloat(twinValue, 64)
+			if err == nil {
+				downstream[twinName] = int(val * 100)
+			}
+		} else if t == "int" {
+			upstream[twinName] = twinValue
+			val, err := strconv.Atoi(twinValue)
+			if err == nil {
+				downstream[twinName] = val
+			}
+		} else {
+			upstream[twinName] = twinValue
+			downstream[twinName] = twinValue
+		}
+	}
+
+	// publish upstream
+	upstream["id"] = id
+	publishToMqtt(cli, upstream)
+
+	// publish downstream
+	publishToDevice(cli, id, downstream)
 }
 
 func handleZigbee(cli mqtt.Client) {
 	topic := "zigbee/+"
-	cli.Subscribe(topic, 0, OperateUpdateZigbeeSub)
+	cli.Subscribe(topic, 0, OperateUpdateUpstream)
+}
+
+func handleDownstream(cli mqtt.Client) {
+	topic := common.DevicePrefix + "+" + common.TwinUpdateDeltaSuffix
+	cli.Subscribe(topic, 0, OperateUpdateZigbeeDownstream)
+}
+
+// getDeviceID extract the device ID from Mqtt topic.
+func getDeviceID(topic string) (id string) {
+	re := regexp.MustCompile("hw/events/device/(.+)/twin/update/delta")
+	return re.FindStringSubmatch(topic)[1]
 }
 
 func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
@@ -147,6 +246,40 @@ func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
 	}
 }
 
+func publishToDevice(cli mqtt.Client, id string, current map[string]interface{}) {
+	// forward message
+	tx, err := boltDB.Begin(true)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	b := tx.Bucket([]byte(gatewayTblName))
+	if b != nil {
+		val := b.Get([]byte(id))
+		gateway := string(val)
+		if gateway != "" {
+			deviceTwinUpdateDelta := gateway
+			for f, v := range current {
+				if f == "gateway" {
+					continue
+				}
+
+				go func(field string, value interface{}) {
+					deltaMessage := createActualUpdateDeltaMessage(id, field, value)
+					twinDeltaBody, _ := json.Marshal(*deltaMessage)
+
+					cli.Publish(deviceTwinUpdateDelta, 0, true, twinDeltaBody)
+				}(f, v)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Fatal(err)
+	}
+}
+
 //createActualUpdateMessage function is used to create the device twin update message
 func createActualUpdateMessage(field string, value string, timestamp int64) common.DeviceTwinUpdate {
 	var updateMsg common.DeviceTwinUpdate
@@ -154,8 +287,16 @@ func createActualUpdateMessage(field string, value string, timestamp int64) comm
 	updateMsg.Twin = map[string]*common.MsgTwin{}
 	updateMsg.Twin[field] = &common.MsgTwin{}
 	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &value}
-	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: "string"}
 	return updateMsg
+}
+
+//createActualUpdateDeltaMessage function is used to create the device twin update delta message
+func createActualUpdateDeltaMessage(id string, field string, value interface{}) *map[string]interface{} {
+	updateDeltaMsg := make(map[string]interface{})
+	updateDeltaMsg["id"] = id
+	updateDeltaMsg["cmd"] = 1
+	updateDeltaMsg[field] = value
+	return &updateDeltaMsg
 }
 
 func loadDB() {
@@ -170,9 +311,16 @@ func loadDB() {
 	}
 
 	err = boltDB.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(tblName))
+		b := tx.Bucket([]byte(statusTblName))
 		if b == nil {
-			_, err := tx.CreateBucket([]byte(tblName))
+			_, err := tx.CreateBucket([]byte(statusTblName))
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		b = tx.Bucket([]byte(gatewayTblName))
+		if b == nil {
+			_, err := tx.CreateBucket([]byte(gatewayTblName))
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -185,7 +333,6 @@ func loadDB() {
 	}
 }
 
-var inactive = ""
 var online = "online"
 var offline = "offline"
 var disabled = "disabled"
@@ -197,11 +344,11 @@ func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 	}
 	defer tx.Rollback()
 
-	b := tx.Bucket([]byte(tblName))
+	b := tx.Bucket([]byte(statusTblName))
 	if b != nil {
 		val := b.Get([]byte(deviceID))
 		status := string(val)
-		if status == inactive || status == offline {
+		if status != disabled {
 			deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
 			updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
 			twinUpdateBody, _ := json.Marshal(updateMessage)
@@ -226,7 +373,7 @@ func updateToOfflineStatus(deviceID string, v interface{}) {
 	}
 	defer tx.Rollback()
 
-	b := tx.Bucket([]byte(tblName))
+	b := tx.Bucket([]byte(statusTblName))
 	if b != nil {
 		cli := *v.(*mqtt.Client)
 		deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
