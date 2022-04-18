@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"regexp"
 	"strconv"
@@ -266,10 +267,8 @@ func publishToDevice(cli mqtt.Client, id string, current map[string]interface{})
 				}
 
 				go func(field string, value interface{}) {
-					deltaMessage := createActualUpdateDeltaMessage(id, field, value)
-					twinDeltaBody, _ := json.Marshal(*deltaMessage)
-
-					cli.Publish(deviceTwinUpdateDelta, 0, true, twinDeltaBody)
+					msg := fmt.Sprintf("{\"id\":\"%s\",\"cmd\":1,\"%s\":%s}", id, field, common.Itos(value))
+					cli.Publish(deviceTwinUpdateDelta, 0, true, []byte(msg))
 				}(f, v)
 			}
 		}
@@ -288,15 +287,6 @@ func createActualUpdateMessage(field string, value string, timestamp int64) comm
 	updateMsg.Twin[field] = &common.MsgTwin{}
 	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &value}
 	return updateMsg
-}
-
-//createActualUpdateDeltaMessage function is used to create the device twin update delta message
-func createActualUpdateDeltaMessage(id string, field string, value interface{}) *map[string]interface{} {
-	updateDeltaMsg := make(map[string]interface{})
-	updateDeltaMsg["id"] = id
-	updateDeltaMsg["cmd"] = 1
-	updateDeltaMsg[field] = value
-	return &updateDeltaMsg
 }
 
 func loadDB() {
