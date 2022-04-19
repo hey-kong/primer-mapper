@@ -171,6 +171,7 @@ var OperateUpdateZigbeeDownstream mqtt.MessageHandler = func(cli mqtt.Client, ms
 					tx.Rollback()
 					log.Fatal(err)
 				}
+				log.Printf("%s's gateway: %s", id, twinValue)
 			}
 
 			if err := tx.Commit(); err != nil {
@@ -198,12 +199,12 @@ var OperateUpdateZigbeeDownstream mqtt.MessageHandler = func(cli mqtt.Client, ms
 		}
 	}
 
+	// publish downstream
+	publishToDevice(cli, id, downstream)
+
 	// publish upstream
 	upstream["id"] = id
 	publishToMqtt(cli, upstream)
-
-	// publish downstream
-	publishToDevice(cli, id, downstream)
 }
 
 func handleZigbee(cli mqtt.Client) {
@@ -242,7 +243,7 @@ func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
 			updateMessage := createActualUpdateMessage(field, common.Itos(value), timestamp)
 			twinUpdateBody, _ := json.Marshal(updateMessage)
 
-			cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
+			cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
 		}(f, v, t)
 	}
 }
@@ -259,6 +260,7 @@ func publishToDevice(cli mqtt.Client, id string, current map[string]interface{})
 	if b != nil {
 		val := b.Get([]byte(id))
 		gateway := string(val)
+		log.Printf("%s's gateway: %s", id, gateway)
 		if gateway != "" {
 			deviceTwinUpdateDelta := gateway
 			for f, v := range current {
@@ -268,7 +270,7 @@ func publishToDevice(cli mqtt.Client, id string, current map[string]interface{})
 
 				go func(field string, value interface{}) {
 					msg := fmt.Sprintf("{\"id\":\"%s\",\"cmd\":1,\"%s\":%s}", id, field, common.Itos(value))
-					cli.Publish(deviceTwinUpdateDelta, 0, true, []byte(msg))
+					cli.Publish(deviceTwinUpdateDelta, 0, false, []byte(msg))
 				}(f, v)
 			}
 		}
@@ -286,6 +288,7 @@ func createActualUpdateMessage(field string, value string, timestamp int64) comm
 	updateMsg.Twin = map[string]*common.MsgTwin{}
 	updateMsg.Twin[field] = &common.MsgTwin{}
 	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &value}
+	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: "Updated"}
 	return updateMsg
 }
 
@@ -307,6 +310,7 @@ func loadDB() {
 			if err != nil {
 				log.Fatal(err)
 			}
+			log.Printf("create bucket %s", statusTblName)
 		}
 		b = tx.Bucket([]byte(gatewayTblName))
 		if b == nil {
@@ -314,6 +318,7 @@ func loadDB() {
 			if err != nil {
 				log.Fatal(err)
 			}
+			log.Printf("create bucket %s", gatewayTblName)
 		}
 		return nil
 	})
@@ -344,7 +349,7 @@ func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 			twinUpdateBody, _ := json.Marshal(updateMessage)
 			log.Printf("device %s is online", deviceID)
 
-			cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
+			cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
 			if err := b.Put([]byte(deviceID), []byte(online)); err != nil {
 				log.Fatal(err)
 			}
@@ -371,7 +376,7 @@ func updateToOfflineStatus(deviceID string, v interface{}) {
 		twinUpdateBody, _ := json.Marshal(updateMessage)
 		log.Printf("device %s is offline", deviceID)
 
-		cli.Publish(deviceTwinUpdate, 0, true, twinUpdateBody)
+		cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
 		if err := b.Put([]byte(deviceID), []byte(offline)); err != nil {
 			log.Fatal(err)
 		}

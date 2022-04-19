@@ -9,6 +9,7 @@ const (
 	DevicePrefix            = "$hw/events/device/"
 	TwinUpdateSuffix        = "/twin/update"
 	TwinUpdateDeltaSuffix   = "/twin/update/delta"
+	TwinUpdateResultSuffix  = "/twin/update/result"
 	DeviceStateUpdateSuffix = "/state/update"
 	TwinCloudSyncSuffix     = "/twin/cloud_updated"
 	TwinGetResultSuffix     = "/twin/get/result"
