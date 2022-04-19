@@ -90,6 +90,9 @@ func main() {
 
 	// subscribe device msg
 	handleZigbee(cli)
+	handleWifi(cli)
+	handleBluetooth(cli)
+	handleNBIoT(cli)
 
 	// subscribe command msg
 	handleDownstream(cli)
@@ -209,6 +212,21 @@ var OperateUpdateZigbeeDownstream mqtt.MessageHandler = func(cli mqtt.Client, ms
 
 func handleZigbee(cli mqtt.Client) {
 	topic := "zigbee/+"
+	cli.Subscribe(topic, 0, OperateUpdateUpstream)
+}
+
+func handleWifi(cli mqtt.Client) {
+	topic := "wifi/+"
+	cli.Subscribe(topic, 0, OperateUpdateUpstream)
+}
+
+func handleBluetooth(cli mqtt.Client) {
+	topic := "bluetooth/+"
+	cli.Subscribe(topic, 0, OperateUpdateUpstream)
+}
+
+func handleNBIoT(cli mqtt.Client) {
+	topic := "nbiot/+"
 	cli.Subscribe(topic, 0, OperateUpdateUpstream)
 }
 
