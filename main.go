@@ -306,7 +306,6 @@ func createActualUpdateMessage(field string, value string, timestamp int64) comm
 	updateMsg.Twin = map[string]*common.MsgTwin{}
 	updateMsg.Twin[field] = &common.MsgTwin{}
 	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &value}
-	updateMsg.Twin[field].Metadata = &common.TypeMetadata{Type: "Updated"}
 	return updateMsg
 }
 
