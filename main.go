@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"primer-mapper/api"
 	"regexp"
 	"strconv"
 	"strings"
@@ -146,7 +147,7 @@ var OperateUpdateDownstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt
 		if twinName == disabled {
 			status := disabled
 			if twinValue == "0" {
-				status = ""
+				status = inactive
 			}
 
 			tx, err := boltDB.Begin(true)
@@ -159,6 +160,11 @@ var OperateUpdateDownstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt
 				if err := b.Put([]byte(id), []byte(status)); err != nil {
 					tx.Rollback()
 					log.Fatal(err)
+				} else {
+					go func() {
+						body := api.UpdateToRemote(id, status)
+						log.Printf("device %s update remote status to %s, %s", id, status, body)
+					}()
 				}
 			}
 
@@ -360,7 +366,7 @@ func loadDB() {
 	}
 }
 
-var inactive = ""
+var inactive = "offactivate"
 var online = "online"
 var offline = "offline"
 var disabled = "disabled"
@@ -397,14 +403,23 @@ func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 
 	b := tx.Bucket([]byte(statusTblName))
 	if b != nil {
-		deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
-		updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
-		twinUpdateBody, _ := json.Marshal(updateMessage)
-		log.Printf("device %s is online", deviceID)
+		val := b.Get([]byte(deviceID))
+		status := string(val)
+		if status != online {
+			deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
+			updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
+			twinUpdateBody, _ := json.Marshal(updateMessage)
+			log.Printf("device %s is online", deviceID)
 
-		cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
-		if err := b.Put([]byte(deviceID), []byte(online)); err != nil {
-			log.Fatal(err)
+			cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
+			if err := b.Put([]byte(deviceID), []byte(online)); err != nil {
+				log.Fatal(err)
+			} else {
+				go func() {
+					body := api.UpdateToRemote(deviceID, online)
+					log.Printf("device %s update remote status to %s, %s", deviceID, online, body)
+				}()
+			}
 		}
 	}
 
@@ -431,6 +446,11 @@ func updateToOfflineStatus(deviceID string, v interface{}) {
 		cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
 		if err := b.Put([]byte(deviceID), []byte(offline)); err != nil {
 			log.Fatal(err)
+		} else {
+			go func() {
+				body := api.UpdateToRemote(deviceID, offline)
+				log.Printf("device %s update remote status to %s, %s", deviceID, offline, body)
+			}()
 		}
 	}
 
