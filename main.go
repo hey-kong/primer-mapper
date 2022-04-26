@@ -344,7 +344,7 @@ func loadDB() {
 	err = boltDB.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(statusTblName))
 		if b == nil {
-			_, err := tx.CreateBucket([]byte(statusTblName))
+			_, err = tx.CreateBucket([]byte(statusTblName))
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -352,7 +352,7 @@ func loadDB() {
 		}
 		b = tx.Bucket([]byte(gatewayTblName))
 		if b == nil {
-			_, err := tx.CreateBucket([]byte(gatewayTblName))
+			_, err = tx.CreateBucket([]byte(gatewayTblName))
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -388,7 +388,7 @@ func isDisabled(deviceID string) bool {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err = tx.Commit(); err != nil {
 		log.Fatal(err)
 	}
 	return ret
@@ -412,7 +412,7 @@ func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 			log.Printf("device %s is online", deviceID)
 
 			cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
-			if err := b.Put([]byte(deviceID), []byte(online)); err != nil {
+			if err = b.Put([]byte(deviceID), []byte(online)); err != nil {
 				log.Fatal(err)
 			} else {
 				go func() {
@@ -423,7 +423,7 @@ func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err = tx.Commit(); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -444,7 +444,7 @@ func updateToOfflineStatus(deviceID string, v interface{}) {
 		log.Printf("device %s is offline", deviceID)
 
 		cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
-		if err := b.Put([]byte(deviceID), []byte(offline)); err != nil {
+		if err = b.Put([]byte(deviceID), []byte(offline)); err != nil {
 			log.Fatal(err)
 		} else {
 			go func() {
@@ -454,7 +454,7 @@ func updateToOfflineStatus(deviceID string, v interface{}) {
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err = tx.Commit(); err != nil {
 		log.Fatal(err)
 	}
 }
