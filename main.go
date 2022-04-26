@@ -52,7 +52,7 @@ func main() {
 	loadDB()
 	defer boltDB.Close()
 
-	// create a cache with an expiration time , and which purges expired
+	// create a cache with an expiration time, and which purges expired
 	// items every 2*expiration time for checking offline devices
 	c = cache.New(expiration, 2*expiration)
 	c.OnEvicted(updateToOfflineStatus)
@@ -123,10 +123,10 @@ var OperateUpdateUpstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.M
 	}
 
 	// publish to mqtt broker
-	publishToMqtt(cli, current)
+	publishToMqtt(cli, current, false)
 }
 
-var OperateUpdateZigbeeDownstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
+var OperateUpdateDownstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
 	id := getDeviceID(msg.Topic())
 	if id == "" {
 		log.Fatal("Wrong topic")
@@ -143,7 +143,12 @@ var OperateUpdateZigbeeDownstream mqtt.MessageHandler = func(cli mqtt.Client, ms
 	upstream := make(map[string]interface{})
 	downstream := make(map[string]interface{})
 	for twinName, twinValue := range delta.Delta {
-		if twinName == "status" {
+		if twinName == disabled {
+			status := disabled
+			if twinValue == "0" {
+				status = ""
+			}
+
 			tx, err := boltDB.Begin(true)
 			if err != nil {
 				log.Fatal(err)
@@ -151,7 +156,7 @@ var OperateUpdateZigbeeDownstream mqtt.MessageHandler = func(cli mqtt.Client, ms
 
 			b := tx.Bucket([]byte(statusTblName))
 			if b != nil {
-				if err := b.Put([]byte(id), []byte(twinValue)); err != nil {
+				if err := b.Put([]byte(id), []byte(status)); err != nil {
 					tx.Rollback()
 					log.Fatal(err)
 				}
@@ -207,7 +212,7 @@ var OperateUpdateZigbeeDownstream mqtt.MessageHandler = func(cli mqtt.Client, ms
 
 	// publish upstream
 	upstream["id"] = id
-	publishToMqtt(cli, upstream)
+	publishToMqtt(cli, upstream, true)
 }
 
 func handleZigbee(cli mqtt.Client) {
@@ -232,7 +237,7 @@ func handleNBIoT(cli mqtt.Client) {
 
 func handleDownstream(cli mqtt.Client) {
 	topic := common.DevicePrefix + "+" + common.TwinUpdateDeltaSuffix
-	cli.Subscribe(topic, 0, OperateUpdateZigbeeDownstream)
+	cli.Subscribe(topic, 0, OperateUpdateDownstream)
 }
 
 // getDeviceID extract the device ID from Mqtt topic.
@@ -241,7 +246,7 @@ func getDeviceID(topic string) (id string) {
 	return re.FindStringSubmatch(topic)[1]
 }
 
-func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
+func publishToMqtt(cli mqtt.Client, current map[string]interface{}, ack bool) {
 	id := current["id"].(string)
 	if id == "" {
 		return
@@ -249,7 +254,17 @@ func publishToMqtt(cli mqtt.Client, current map[string]interface{}) {
 
 	// check status
 	c.Set(id, &cli, cache.DefaultExpiration)
-	updateToOnlineStatus(cli, id)
+
+	// if disabled, do not send msg
+	if !ack && isDisabled(id) {
+		return
+	}
+
+	// update online status
+	if !ack {
+		updateToOnlineStatus(cli, id)
+	}
+
 	// forward message
 	deviceTwinUpdate := common.DevicePrefix + id + common.TwinUpdateSuffix
 	t := common.GetTimestamp()
@@ -345,9 +360,33 @@ func loadDB() {
 	}
 }
 
+var inactive = ""
 var online = "online"
 var offline = "offline"
 var disabled = "disabled"
+
+func isDisabled(deviceID string) bool {
+	tx, err := boltDB.Begin(true)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tx.Rollback()
+
+	ret := false
+	b := tx.Bucket([]byte(statusTblName))
+	if b != nil {
+		val := b.Get([]byte(deviceID))
+		status := string(val)
+		if status == disabled {
+			ret = true
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Fatal(err)
+	}
+	return ret
+}
 
 func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 	tx, err := boltDB.Begin(true)
@@ -358,18 +397,14 @@ func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 
 	b := tx.Bucket([]byte(statusTblName))
 	if b != nil {
-		val := b.Get([]byte(deviceID))
-		status := string(val)
-		if status != disabled {
-			deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
-			updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
-			twinUpdateBody, _ := json.Marshal(updateMessage)
-			log.Printf("device %s is online", deviceID)
+		deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
+		updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
+		twinUpdateBody, _ := json.Marshal(updateMessage)
+		log.Printf("device %s is online", deviceID)
 
-			cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
-			if err := b.Put([]byte(deviceID), []byte(online)); err != nil {
-				log.Fatal(err)
-			}
+		cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
+		if err := b.Put([]byte(deviceID), []byte(online)); err != nil {
+			log.Fatal(err)
 		}
 	}
 
