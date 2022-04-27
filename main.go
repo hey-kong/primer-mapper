@@ -35,17 +35,58 @@ var expiration = 60 * time.Second
 var logFile = "/tmp/log/primer_mapper.log"
 var log = logrus.New()
 
+var inactive = "offactivate"
+var online = "online"
+var offline = "offline"
+var disabled = "disabled"
+
 func connectToMqtt() mqtt.Client {
 	opts := mqtt.NewClientOptions().AddBroker(mqttServer)
 
 	opts.SetKeepAlive(60 * time.Second)
 	opts.SetPingTimeout(1 * time.Second)
 
-	c := mqtt.NewClient(opts)
-	if token := c.Connect(); token.Wait() && token.Error() != nil {
+	cli := mqtt.NewClient(opts)
+	if token := cli.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
-	return c
+	return cli
+}
+
+func loadDB() {
+	if ok := common.PathIsExist(dir); !ok {
+		common.CreateDir(dir)
+	}
+
+	var err error
+	boltDB, err = bolt.Open(dir+dbName, 0666, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	err = boltDB.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(statusTblName))
+		if b == nil {
+			_, err = tx.CreateBucket([]byte(statusTblName))
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("create bucket %s", statusTblName)
+		}
+		b = tx.Bucket([]byte(gatewayTblName))
+		if b == nil {
+			_, err = tx.CreateBucket([]byte(gatewayTblName))
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("create bucket %s", gatewayTblName)
+		}
+		return nil
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func main() {
@@ -98,6 +139,10 @@ func main() {
 	// subscribe command msg
 	handleDownstream(cli)
 
+	// subscribe membership msg
+	handleMembership(cli)
+	handleMembershipResult(cli)
+
 	for {
 		select {
 		// Check for termination request
@@ -115,6 +160,7 @@ func main() {
 	log.Info("exited")
 }
 
+// OperateUpdateUpstream function is used to process uplink device message
 var OperateUpdateUpstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
 	log.Info("Receive msg: ", string(msg.Payload()))
 	current := make(map[string]interface{})
@@ -127,6 +173,7 @@ var OperateUpdateUpstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.M
 	publishToMqtt(cli, current, false)
 }
 
+// OperateUpdateDownstream function is used to process downlink device message
 var OperateUpdateDownstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
 	id := getDeviceID(msg.Topic())
 	if id == "" {
@@ -221,6 +268,50 @@ var OperateUpdateDownstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt
 	publishToMqtt(cli, upstream, true)
 }
 
+// OperateMemGet function is used to process membership get message
+var OperateMemGet mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
+	log.Info("Receive msg: ", string(msg.Payload()))
+	current := make(map[string]string)
+	if err := json.Unmarshal(msg.Payload(), &current); err != nil {
+		log.Errorf("unmarshal receive msg, error %v\n", err)
+		return
+	}
+
+	node := current["node"]
+	if node == "" {
+		return
+	}
+
+	// forward message, publish to mqtt broker
+	memGet := common.MemETPrefix + node + common.MemETGetSuffix
+	t := common.GetTimestamp()
+	membershipMessage := common.CreateBaseMessage(t)
+	membershipGetBody, _ := json.Marshal(membershipMessage)
+
+	cli.Publish(memGet, 0, false, membershipGetBody)
+}
+
+// OperateMemGetResult function is used to process membership get result message
+var OperateMemGetResult mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
+	node := getNodeName(msg.Topic())
+	if node == "" {
+		log.Fatal("Wrong topic")
+		return
+	}
+
+	log.Info("Receive msg: ", string(msg.Payload()))
+	var detail common.MembershipDetail
+	if err := json.Unmarshal(msg.Payload(), &detail); err != nil {
+		log.Errorf("Unmarshal message failed: %v", err)
+		return
+	}
+
+	topic := "membership/result"
+	// return the array of devices temporarily
+	membershipGetResultBody, _ := json.Marshal(detail.Devices)
+	cli.Publish(topic, 0, false, membershipGetResultBody)
+}
+
 func handleZigbee(cli mqtt.Client) {
 	topic := "zigbee/+"
 	cli.Subscribe(topic, 0, OperateUpdateUpstream)
@@ -242,13 +333,29 @@ func handleNBIoT(cli mqtt.Client) {
 }
 
 func handleDownstream(cli mqtt.Client) {
-	topic := common.DevicePrefix + "+" + common.TwinUpdateDeltaSuffix
+	topic := common.DeviceETPrefix + "+" + common.TwinETDeltaSuffix
 	cli.Subscribe(topic, 0, OperateUpdateDownstream)
+}
+
+func handleMembership(cli mqtt.Client) {
+	topic := "membership"
+	cli.Subscribe(topic, 0, OperateMemGet)
+}
+
+func handleMembershipResult(cli mqtt.Client) {
+	topic := common.MemETPrefix + "+" + common.MemETGetResultSuffix
+	cli.Subscribe(topic, 0, OperateMemGetResult)
 }
 
 // getDeviceID extract the device ID from Mqtt topic.
 func getDeviceID(topic string) (id string) {
 	re := regexp.MustCompile("hw/events/device/(.+)/twin/update/delta")
+	return re.FindStringSubmatch(topic)[1]
+}
+
+// getNodeName extract the node name from Mqtt topic.
+func getNodeName(topic string) (name string) {
+	re := regexp.MustCompile("hw/events/node/(.+)/membership/get/result")
 	return re.FindStringSubmatch(topic)[1]
 }
 
@@ -272,14 +379,14 @@ func publishToMqtt(cli mqtt.Client, current map[string]interface{}, ack bool) {
 	}
 
 	// forward message
-	deviceTwinUpdate := common.DevicePrefix + id + common.TwinUpdateSuffix
+	deviceTwinUpdate := common.DeviceETPrefix + id + common.TwinETUpdateSuffix
 	t := common.GetTimestamp()
 	for f, v := range current {
 		if f == "id" {
 			continue
 		}
 		go func(field string, value interface{}, timestamp int64) {
-			updateMessage := createActualUpdateMessage(field, common.Itos(value), timestamp)
+			updateMessage := common.CreateActualUpdateMessage(field, common.Itos(value), timestamp)
 			twinUpdateBody, _ := json.Marshal(updateMessage)
 
 			cli.Publish(deviceTwinUpdate, 0, false, twinUpdateBody)
@@ -315,61 +422,10 @@ func publishToDevice(cli mqtt.Client, id string, current map[string]interface{})
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err = tx.Commit(); err != nil {
 		log.Fatal(err)
 	}
 }
-
-//createActualUpdateMessage function is used to create the device twin update message
-func createActualUpdateMessage(field string, value string, timestamp int64) common.DeviceTwinUpdate {
-	var updateMsg common.DeviceTwinUpdate
-	updateMsg.BaseMessage.Timestamp = timestamp
-	updateMsg.Twin = map[string]*common.MsgTwin{}
-	updateMsg.Twin[field] = &common.MsgTwin{}
-	updateMsg.Twin[field].Actual = &common.TwinValue{Value: &value}
-	return updateMsg
-}
-
-func loadDB() {
-	if ok := common.PathIsExist(dir); !ok {
-		common.CreateDir(dir)
-	}
-
-	var err error
-	boltDB, err = bolt.Open(dir+dbName, 0666, nil)
-	if err != nil {
-		panic(err)
-	}
-
-	err = boltDB.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(statusTblName))
-		if b == nil {
-			_, err = tx.CreateBucket([]byte(statusTblName))
-			if err != nil {
-				log.Fatal(err)
-			}
-			log.Printf("create bucket %s", statusTblName)
-		}
-		b = tx.Bucket([]byte(gatewayTblName))
-		if b == nil {
-			_, err = tx.CreateBucket([]byte(gatewayTblName))
-			if err != nil {
-				log.Fatal(err)
-			}
-			log.Printf("create bucket %s", gatewayTblName)
-		}
-		return nil
-	})
-
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
-var inactive = "offactivate"
-var online = "online"
-var offline = "offline"
-var disabled = "disabled"
 
 func isDisabled(deviceID string) bool {
 	tx, err := boltDB.Begin(true)
@@ -406,8 +462,8 @@ func updateToOnlineStatus(cli mqtt.Client, deviceID string) {
 		val := b.Get([]byte(deviceID))
 		status := string(val)
 		if status != online {
-			deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
-			updateMessage := createActualUpdateMessage("status", online, common.GetTimestamp())
+			deviceTwinUpdate := common.DeviceETPrefix + deviceID + common.TwinETUpdateSuffix
+			updateMessage := common.CreateActualUpdateMessage("status", online, common.GetTimestamp())
 			twinUpdateBody, _ := json.Marshal(updateMessage)
 			log.Printf("device %s is online", deviceID)
 
@@ -438,8 +494,8 @@ func updateToOfflineStatus(deviceID string, v interface{}) {
 	b := tx.Bucket([]byte(statusTblName))
 	if b != nil {
 		cli := *v.(*mqtt.Client)
-		deviceTwinUpdate := common.DevicePrefix + deviceID + common.TwinUpdateSuffix
-		updateMessage := createActualUpdateMessage("status", offline, common.GetTimestamp())
+		deviceTwinUpdate := common.DeviceETPrefix + deviceID + common.TwinETUpdateSuffix
+		updateMessage := common.CreateActualUpdateMessage("status", offline, common.GetTimestamp())
 		twinUpdateBody, _ := json.Marshal(updateMessage)
 		log.Printf("device %s is offline", deviceID)
 
