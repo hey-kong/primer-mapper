@@ -126,6 +126,18 @@ type MembershipDetail struct {
 	Devices []Device `json:"devices"`
 }
 
+// GetDeviceID extract the device ID from Mqtt topic.
+func GetDeviceID(topic string) (id string) {
+	re := regexp.MustCompile("hw/events/device/(.+)/twin/update/delta")
+	return re.FindStringSubmatch(topic)[1]
+}
+
+// GetNodeName extract the node name from Mqtt topic.
+func GetNodeName(topic string) (name string) {
+	re := regexp.MustCompile("hw/events/node/(.+)/membership/get/result")
+	return re.FindStringSubmatch(topic)[1]
+}
+
 func GetTimestamp() int64 {
 	return time.Now().UnixNano() / 1e6
 }
@@ -133,7 +145,7 @@ func GetTimestamp() int64 {
 func MatchType(str string) string {
 	if matched, _ := regexp.Match("[-+]?[0-9]*\\.?[0-9]+f", []byte(str)); matched {
 		return "float"
-	} else if matched, _ := regexp.Match("[-+]?[0-9]+", []byte(str)); matched {
+	} else if matched, _ = regexp.Match("[-+]?[0-9]+", []byte(str)); matched {
 		return "int"
 	} else {
 		return "string"
@@ -142,9 +154,9 @@ func MatchType(str string) string {
 
 //CreateBaseMessage function is used to create the base message
 func CreateBaseMessage(timestamp int64) BaseMessage {
-	var getMsg BaseMessage
-	getMsg.Timestamp = timestamp
-	return getMsg
+	var baseMsg BaseMessage
+	baseMsg.Timestamp = timestamp
+	return baseMsg
 }
 
 //CreateActualUpdateMessage function is used to create the device twin update message

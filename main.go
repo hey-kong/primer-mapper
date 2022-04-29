@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"primer-mapper/api"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -175,7 +174,7 @@ var OperateUpdateUpstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.M
 
 // OperateUpdateDownstream function is used to process downlink device message
 var OperateUpdateDownstream mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
-	id := getDeviceID(msg.Topic())
+	id := common.GetDeviceID(msg.Topic())
 	if id == "" {
 		log.Fatal("Wrong topic")
 		return
@@ -293,7 +292,7 @@ var OperateMemGet mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) 
 
 // OperateMemGetResult function is used to process membership get result message
 var OperateMemGetResult mqtt.MessageHandler = func(cli mqtt.Client, msg mqtt.Message) {
-	node := getNodeName(msg.Topic())
+	node := common.GetNodeName(msg.Topic())
 	if node == "" {
 		log.Fatal("Wrong topic")
 		return
@@ -345,18 +344,6 @@ func handleMembership(cli mqtt.Client) {
 func handleMembershipResult(cli mqtt.Client) {
 	topic := common.MemETPrefix + "+" + common.MemETGetResultSuffix
 	cli.Subscribe(topic, 0, OperateMemGetResult)
-}
-
-// getDeviceID extract the device ID from Mqtt topic.
-func getDeviceID(topic string) (id string) {
-	re := regexp.MustCompile("hw/events/device/(.+)/twin/update/delta")
-	return re.FindStringSubmatch(topic)[1]
-}
-
-// getNodeName extract the node name from Mqtt topic.
-func getNodeName(topic string) (name string) {
-	re := regexp.MustCompile("hw/events/node/(.+)/membership/get/result")
-	return re.FindStringSubmatch(topic)[1]
 }
 
 func publishToMqtt(cli mqtt.Client, current map[string]interface{}, ack bool) {
