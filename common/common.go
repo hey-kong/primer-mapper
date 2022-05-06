@@ -143,9 +143,9 @@ func GetTimestamp() int64 {
 }
 
 func MatchType(str string) string {
-	if matched, _ := regexp.Match("[-+]?[0-9]*\\.?[0-9]+f", []byte(str)); matched {
+	if matched, _ := regexp.Match("^[-+]?[0-9]*\\.?[0-9]+f$", []byte(str)); matched {
 		return "float"
-	} else if matched, _ = regexp.Match("[-+]?[0-9]+", []byte(str)); matched {
+	} else if matched, _ = regexp.Match("^[-+]?[0-9]+$", []byte(str)); matched {
 		return "int"
 	} else {
 		return "string"
