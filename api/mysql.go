@@ -6,7 +6,7 @@ import (
 	"net/url"
 )
 
-var mysqlApi = "http://120.78.175.124/back-server/device/update_device_status"
+var mysqlApi = "http://47.107.112.135:8089/back-server/device/update_device_status"
 
 // UpdateToRemote updates device status in remote mysql
 func UpdateToRemote(deviceID string, status string) string {
